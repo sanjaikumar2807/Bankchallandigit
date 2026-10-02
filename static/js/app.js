@@ -1,0 +1,1428 @@
+// Bank Challan Machine - Main Application JavaScript
+
+class ChallanApp {
+    constructor() {
+        this.currentScreen = 'welcome-screen';
+        this.transactionData = {
+            type: null,
+            accountNumber: '',
+            accountHolderName: '',
+            amount: 0,
+            timestamp: null
+        };
+        this.sessionTimer = 300; // 5 minutes in seconds
+        this.sessionInterval = null;
+        this.voiceEnabled = true;
+        this.currentLanguage = 'en';
+        this.isLoading = false;
+        
+        // API Configuration — auto-detect Django backend
+        this.API_BASE_URL = this.detectApiBaseUrl();
+        
+        // Store last API response for printing
+        this.lastApiResponse = null;
+        
+        this.initializeApp();
+    }
+    
+    detectApiBaseUrl() {
+        // If served from Django (same origin), use relative paths
+        const currentOrigin = window.location.origin;
+        if (currentOrigin.includes('localhost') || currentOrigin.includes('127.0.0.1')) {
+            // Local development — use the Django dev server
+            return 'http://127.0.0.1:8000/api';
+        }
+        // Production: assume same origin (Django serves everything)
+        return `${currentOrigin}/api`;
+    }
+    
+    initializeApp() {
+        console.log('Initializing Bank Challan Machine...');
+        
+        // Start session timer
+        this.startSessionTimer();
+        
+        // Update datetime
+        this.updateDateTime();
+        setInterval(() => this.updateDateTime(), 1000);
+        
+        // Initialize voice system
+        this.initializeVoice();
+        
+        // Setup event listeners
+        this.setupEventListeners();
+        
+        // Check for camera support
+        this.checkCameraSupport();
+        
+        // Load saved preferences
+        this.loadUserPreferences();
+        
+        console.log('Bank Challan Machine initialized successfully');
+    }
+    
+    setupEventListeners() {
+        // Prevent context menu
+        document.addEventListener('contextmenu', (e) => e.preventDefault());
+        
+        // Prevent zoom on double tap
+        document.addEventListener('touchstart', (e) => {
+            if (e.touches.length > 1) {
+                e.preventDefault();
+            }
+        });
+        
+        // Handle keyboard navigation
+        document.addEventListener('keydown', (e) => {
+            this.handleKeyPress(e);
+        });
+        
+        // Handle visibility change
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                this.pauseSession();
+            } else {
+                this.resumeSession();
+            }
+        });
+        
+        // Handle input validation
+        this.setupInputValidation();
+        
+        // Handle amount input
+        this.setupAmountInput();
+    }
+    
+    handleKeyPress(event) {
+        // Global keyboard shortcuts
+        switch(event.key) {
+            case 'Escape':
+                this.goBack();
+                break;
+            case 'F1':
+                event.preventDefault();
+                this.showHelp();
+                break;
+            case 'F5':
+                event.preventDefault();
+                this.restartSession();
+                break;
+        }
+    }
+    
+    setupInputValidation() {
+        // Account number validation
+        const accountInput = document.getElementById('account-number');
+        const confirmAccountInput = document.getElementById('confirm-account-number');
+        
+        if (accountInput) {
+            accountInput.addEventListener('input', (e) => {
+                // Only allow numbers
+                const rawVal = e.target.value.replace(/[^0-9]/g, '');
+                e.target.value = rawVal;
+                e.target.dataset.actualValue = rawVal;
+                
+                // When exactly 12 digits are typed, automatically fetch customer name
+                if (rawVal.length === 12) {
+                    this.fetchCustomerByAccountNumber(rawVal);
+                } else {
+                    const badge = document.getElementById('account-lookup-badge');
+                    if (badge && rawVal.length < 12) {
+                        badge.style.display = 'none';
+                    }
+                    if (rawVal.length !== 12) {
+                        this._lastFetchedAccount = null;
+                    }
+                }
+            });
+
+            accountInput.addEventListener('blur', (e) => {
+                const rawVal = (e.target.dataset.actualValue || e.target.value).replace(/[^0-9]/g, '');
+                if (rawVal.length === 12) {
+                    this.fetchCustomerByAccountNumber(rawVal);
+                }
+            });
+
+            accountInput.addEventListener('paste', (e) => {
+                setTimeout(() => {
+                    const rawVal = e.target.value.replace(/[^0-9]/g, '');
+                    if (rawVal.length === 12) {
+                        this.fetchCustomerByAccountNumber(rawVal);
+                    }
+                }, 50);
+            });
+        }
+        
+        if (confirmAccountInput) {
+            confirmAccountInput.addEventListener('input', (e) => {
+                e.target.value = e.target.value.replace(/[^0-9]/g, '');
+            });
+        }
+        
+        // Account holder name validation
+        const nameInput = document.getElementById('account-holder-name');
+        if (nameInput) {
+            nameInput.addEventListener('input', (e) => {
+                // Only allow letters and spaces
+                e.target.value = e.target.value.replace(/[^a-zA-Z\s]/g, '');
+                
+                // Capitalize first letter of each word
+                const words = e.target.value.split(' ');
+                const capitalized = words.map(word => 
+                    word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+                ).join(' ');
+                e.target.value = capitalized;
+            });
+        }
+    }
+    
+    setupAmountInput() {
+        const amountTextInput = document.getElementById('amount-text-input');
+        if (amountTextInput) {
+            amountTextInput.addEventListener('input', (e) => {
+                // Only allow numbers
+                let value = e.target.value.replace(/[^0-9]/g, '');
+                
+                // Update display
+                this.updateAmountDisplay(value);
+            });
+        }
+    }
+    
+    updateDateTime() {
+        const datetimeElement = document.getElementById('datetime');
+        if (datetimeElement) {
+            const now = new Date();
+            const options = {
+                weekday: 'short',
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false
+            };
+            datetimeElement.textContent = now.toLocaleString('en-IN', options);
+        }
+    }
+    
+    startSessionTimer() {
+        this.sessionInterval = setInterval(() => {
+            this.sessionTimer--;
+            this.updateSessionDisplay();
+            
+            if (this.sessionTimer <= 0) {
+                this.sessionTimeout();
+            } else if (this.sessionTimer <= 30) {
+                this.showSessionWarning();
+            }
+        }, 1000);
+    }
+    
+    updateSessionDisplay() {
+        const sessionElement = document.getElementById('session-timer');
+        if (sessionElement) {
+            const minutes = Math.floor(this.sessionTimer / 60);
+            const seconds = this.sessionTimer % 60;
+            sessionElement.textContent = `Session: ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        }
+    }
+    
+    pauseSession() {
+        if (this.sessionInterval) {
+            clearInterval(this.sessionInterval);
+            this.sessionInterval = null;
+        }
+    }
+    
+    resumeSession() {
+        if (!this.sessionInterval && this.sessionTimer > 0) {
+            this.startSessionTimer();
+        }
+    }
+    
+    showSessionWarning() {
+        // Show warning when less than 30 seconds remaining
+        if (this.sessionTimer === 30 || this.sessionTimer === 10) {
+            this.showNotification(`Session expiring in ${this.sessionTimer} seconds`, 'warning');
+            if (this.voiceEnabled) {
+                this.speakText(`Session expiring in ${this.sessionTimer} seconds`);
+            }
+        }
+    }
+    
+    sessionTimeout() {
+        this.showNotification('Session expired. Starting new session...', 'info');
+        this.restartSession();
+    }
+    
+    restartSession() {
+        // Reset session
+        this.sessionTimer = 300;
+        this.transactionData = {
+            type: null,
+            accountNumber: '',
+            accountHolderName: '',
+            amount: 0,
+            timestamp: null
+        };
+        
+        // Clear all inputs
+        this.clearAllInputs();
+        
+        // Go to welcome screen
+        this.showScreen('welcome-screen');
+        
+        // Restart timer
+        if (this.sessionInterval) {
+            clearInterval(this.sessionInterval);
+        }
+        this.startSessionTimer();
+    }
+    
+    clearAllInputs() {
+        // Clear all form inputs
+        const inputs = document.querySelectorAll('input');
+        inputs.forEach(input => {
+            input.value = '';
+        });
+        
+        // Reset amount display
+        this.updateAmountDisplay(0);
+    }
+    
+    // Screen Management
+    showScreen(screenId) {
+        // Hide all screens
+        const screens = document.querySelectorAll('.screen');
+        screens.forEach(screen => {
+            screen.classList.remove('active');
+        });
+        
+        // Show target screen
+        const targetScreen = document.getElementById(screenId);
+        if (targetScreen) {
+            targetScreen.classList.add('active');
+            this.currentScreen = screenId;
+            
+            // Screen-specific initialization
+            this.initializeScreen(screenId);
+        }
+    }
+    
+    initializeScreen(screenId) {
+        switch(screenId) {
+            case 'welcome-screen':
+                this.speakText('Welcome to Bank Challan Service. Please select a transaction type to begin.');
+                break;
+            case 'account-screen':
+                document.getElementById('account-number').focus();
+                break;
+            case 'amount-screen':
+                this.resetAmountInput();
+                break;
+            case 'confirmation-screen':
+                this.populateConfirmationDetails();
+                break;
+            case 'challan-screen':
+                this.generateChallanContent();
+                break;
+        }
+    }
+    
+    // Transaction Flow
+    selectTransactionType(type) {
+        this.transactionData.type = type;
+        this.showScreen('account-screen');
+        
+        // Voice feedback
+        const typeNames = {
+            'deposit': 'deposit',
+            'withdrawal': 'withdrawal'
+        };
+        this.speakText(`You selected ${typeNames[type]}. Please enter your account number.`);
+    }
+    
+    proceedToAmount() {
+        // Validate account details
+        const accountNumber = document.getElementById('account-number').value.replace(/\s/g, '');
+        const confirmAccountNumber = document.getElementById('confirm-account-number').value;
+        const accountHolderName = document.getElementById('account-holder-name').value.trim();
+        
+        if (!accountNumber || accountNumber.length !== 12) {
+            this.showNotification('Please enter a valid 12-digit account number', 'error');
+            this.shakeElement('account-number');
+            return;
+        }
+        
+        if (accountNumber !== confirmAccountNumber) {
+            this.showNotification('Account numbers do not match', 'error');
+            this.shakeElement('confirm-account-number');
+            return;
+        }
+        
+        if (!accountHolderName || accountHolderName.length < 3) {
+            this.showNotification('Please enter a valid account holder name', 'error');
+            this.shakeElement('account-holder-name');
+            return;
+        }
+        
+        // Save transaction data
+        this.transactionData.accountNumber = accountNumber;
+        this.transactionData.accountHolderName = accountHolderName;
+        
+        // Proceed to amount screen
+        this.showScreen('amount-screen');
+        this.speakText('Please enter the amount using the keypad or voice input.');
+    }
+    
+    // Amount Input Methods
+    setInputMethod(method) {
+        // Update method buttons
+        const methodBtns = document.querySelectorAll('.method-btn');
+        methodBtns.forEach(btn => btn.classList.remove('active'));
+        event.target.closest('.method-btn').classList.add('active');
+        
+        // Show corresponding input method
+        const inputMethods = document.querySelectorAll('.input-method');
+        inputMethods.forEach(method => method.classList.remove('active'));
+        
+        const targetMethod = document.getElementById(`${method}-input`);
+        if (targetMethod) {
+            targetMethod.classList.add('active');
+        }
+        
+        // Focus appropriate input
+        if (method === 'text') {
+            setTimeout(() => {
+                const textInput = document.getElementById('amount-text-input');
+                if (textInput) textInput.focus();
+            }, 100);
+        }
+    }
+    
+    addDigit(digit) {
+        const currentAmount = this.transactionData.amount.toString();
+        const newAmount = currentAmount + digit;
+        
+        // Prevent amount from being too large
+        if (parseInt(newAmount) > 999999) {
+            this.showNotification('Maximum amount exceeded', 'warning');
+            return;
+        }
+        
+        this.transactionData.amount = parseInt(newAmount);
+        this.updateAmountDisplay(this.transactionData.amount);
+        
+        // Voice feedback for large amounts
+        if (this.voiceEnabled && this.transactionData.amount > 0 && this.transactionData.amount % 1000 === 0) {
+            this.speakNumber(this.transactionData.amount);
+        }
+    }
+    
+    setAmount(amount) {
+        this.transactionData.amount = amount;
+        this.updateAmountDisplay(amount);
+        
+        if (this.voiceEnabled) {
+            this.speakNumber(amount);
+        }
+    }
+    
+    clearAmount() {
+        this.transactionData.amount = 0;
+        this.updateAmountDisplay(0);
+    }
+    
+    updateAmountDisplay(amount) {
+        const displayElement = document.getElementById('amount-display');
+        if (displayElement) {
+            displayElement.textContent = parseInt(amount).toLocaleString('en-IN');
+        }
+        
+        // Update text input if visible
+        const textInput = document.getElementById('amount-text-input');
+        if (textInput && document.getElementById('text-input').classList.contains('active')) {
+            textInput.value = amount;
+        }
+    }
+    
+    resetAmountInput() {
+        this.transactionData.amount = 0;
+        this.updateAmountDisplay(0);
+        
+        // Reset to keypad input
+        const keypadBtn = document.querySelector('.method-btn');
+        if (keypadBtn) {
+            keypadBtn.click();
+        }
+    }
+    
+    proceedToConfirmation() {
+        if (this.transactionData.amount <= 0) {
+            this.showNotification('Please enter a valid amount', 'error');
+            this.shakeElement('amount-display');
+            return;
+        }
+        
+        // Set timestamp
+        this.transactionData.timestamp = new Date().toISOString();
+        
+        // Show confirmation screen
+        this.showScreen('confirmation-screen');
+        this.speakText('Please confirm your transaction details.');
+    }
+    
+    populateConfirmationDetails() {
+        // Update confirmation screen with transaction details
+        const typeElement = document.getElementById('confirm-type');
+        const accountElement = document.getElementById('confirm-account');
+        const nameElement = document.getElementById('confirm-name');
+        const amountElement = document.getElementById('confirm-amount');
+        const datetimeElement = document.getElementById('confirm-datetime');
+        
+        if (typeElement) {
+            const typeNames = {
+                'deposit': 'Deposit',
+                'withdrawal': 'Withdrawal'
+            };
+            typeElement.textContent = typeNames[this.transactionData.type] || '-';
+        }
+        
+        if (accountElement) {
+            // Format account number with spaces
+            const formatted = this.transactionData.accountNumber.replace(/(\d{4})(\d{4})(\d{4})/, '$1 $2 $3');
+            accountElement.textContent = formatted;
+        }
+        
+        if (nameElement) {
+            nameElement.textContent = this.transactionData.accountHolderName || '-';
+        }
+        
+        if (amountElement) {
+            amountElement.textContent = `₹${parseInt(this.transactionData.amount).toLocaleString('en-IN')}`;
+        }
+        
+        if (datetimeElement) {
+            const date = new Date(this.transactionData.timestamp);
+            datetimeElement.textContent = date.toLocaleString('en-IN');
+        }
+    }
+    
+    async generateChallan() {
+        // Check if confirmation checkbox is checked
+        const confirmCheckbox = document.getElementById('confirm-checkbox');
+        if (!confirmCheckbox || !confirmCheckbox.checked) {
+            this.showNotification('Please confirm the transaction details', 'warning');
+            this.shakeElement('confirm-checkbox');
+            return;
+        }
+        
+        // Submit to API
+        await this.submitChallanToAPI();
+    }
+    
+    generateChallanContent() {
+        const challanDocument = document.getElementById('challan-document');
+        if (!challanDocument) return;
+        
+        const date = new Date(this.transactionData.timestamp);
+        const formattedDate = date.toLocaleDateString('en-IN');
+        const formattedTime = date.toLocaleTimeString('en-IN');
+        const formattedAccount = this.transactionData.accountNumber.replace(/(\d{4})(\d{4})(\d{4})/, '$1 $2 $3');
+        
+        const challanHTML = `
+            <div class="challan-header">
+                <div class="bank-info">
+                    <h2>Bank Challan Receipt</h2>
+                    <p>Official Bank Document</p>
+                </div>
+                <div class="challan-number">
+                    <p>Challan No: ${this.generateChallanNumber()}</p>
+                </div>
+            </div>
+            
+            <div class="challan-details">
+                <div class="section">
+                    <h3>Transaction Details</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <label>Transaction Type:</label>
+                            <span>${this.transactionData.type.charAt(0).toUpperCase() + this.transactionData.type.slice(1)}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Date:</label>
+                            <span>${formattedDate}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Time:</label>
+                            <span>${formattedTime}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h3>Account Information</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <label>Account Number:</label>
+                            <span>${formattedAccount}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Account Holder:</label>
+                            <span>${this.transactionData.accountHolderName}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section amount-section">
+                    <h3>Amount Details</h3>
+                    <div class="amount-breakdown">
+                        <div class="amount-row">
+                            <label>Principal Amount:</label>
+                            <span>₹${parseInt(this.transactionData.amount).toLocaleString('en-IN')}</span>
+                        </div>
+                        <div class="amount-row">
+                            <label>Processing Fee:</label>
+                            <span>₹0.00</span>
+                        </div>
+                        <div class="amount-row total">
+                            <label>Total Amount:</label>
+                            <span>₹${parseInt(this.transactionData.amount).toLocaleString('en-IN')}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="challan-footer">
+                <div class="verification-info">
+                    <p>This is a computer-generated challan and is valid without signature.</p>
+                    <p>For any queries, please contact: 1800-123-4567</p>
+                </div>
+                <div class="barcode">
+                    <div class="barcode-lines"></div>
+                    <div class="barcode-number">${this.generateChallanNumber()}</div>
+                </div>
+            </div>
+        `;
+        
+        challanDocument.innerHTML = challanHTML;
+    }
+    
+    generateChallanNumber() {
+        const timestamp = Date.now();
+        const random = Math.floor(Math.random() * 10000);
+        return `CH${timestamp}${random}`;
+    }
+    
+    // ==========================================
+    // API Integration Methods
+    // ==========================================
+    
+    showLoadingSpinner(message = 'Processing...') {
+        this.isLoading = true;
+        // Remove any existing spinner
+        this.hideLoadingSpinner();
+        
+        const overlay = document.createElement('div');
+        overlay.id = 'loading-overlay';
+        overlay.className = 'loading-overlay';
+        overlay.innerHTML = `
+            <div class="loading-spinner-container">
+                <div class="loading-spinner"></div>
+                <p class="loading-message">${message}</p>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+    }
+    
+    hideLoadingSpinner() {
+        this.isLoading = false;
+        const overlay = document.getElementById('loading-overlay');
+        if (overlay) {
+            overlay.classList.add('fade-out');
+            setTimeout(() => overlay.remove(), 300);
+        }
+    }
+    
+    /**
+     * Automatically fetch customer name and details by account number.
+     * Hits GET /api/transaction/validate/?account_number=<number>
+     * and auto-populates the account holder name and confirmation inputs.
+     */
+    async fetchCustomerByAccountNumber(accountNumber) {
+        if (!accountNumber) return null;
+        const clean = accountNumber.toString().trim().replace(/[^0-9]/g, '');
+        if (clean.length !== 12) return null;
+        
+        // Prevent duplicate calls if already fetched
+        if (this._lastFetchedAccount === clean) return null;
+        
+        const nameInput = document.getElementById('account-holder-name');
+        const confirmInput = document.getElementById('confirm-account-number');
+        const badge = document.getElementById('account-lookup-badge');
+        
+        if (badge) {
+            badge.style.display = 'inline-flex';
+            badge.className = 'account-lookup-badge loading';
+            badge.innerHTML = '<span>⏳</span> <span>Looking up customer details...</span>';
+        }
+        
+        try {
+            const response = await fetch(`${this.API_BASE_URL}/transaction/validate/?account_number=${encodeURIComponent(clean)}`, {
+                headers: { 'Accept': 'application/json' }
+            });
+            const data = await response.json();
+            
+            if (data.success && data.data) {
+                this._lastFetchedAccount = clean;
+                const customer = data.data;
+                
+                // Automatically populate Account Holder Name
+                if (nameInput) {
+                    nameInput.value = customer.account_holder_name;
+                    nameInput.classList.add('auto-filled-highlight');
+                    setTimeout(() => nameInput.classList.remove('auto-filled-highlight'), 1800);
+                }
+                
+                // Automatically populate Confirm Account Number
+                if (confirmInput) {
+                    confirmInput.value = clean;
+                }
+                
+                // Update transaction data state
+                this.transactionData.accountNumber = clean;
+                this.transactionData.accountHolderName = customer.account_holder_name;
+                
+                // Display success badge
+                if (badge) {
+                    const typeDisplay = customer.account_type ? customer.account_type.toUpperCase() : 'SAVINGS';
+                    const balanceDisplay = (customer.balance !== undefined) 
+                        ? ` &bull; Balance: ₹${Number(customer.balance).toLocaleString('en-IN')}` 
+                        : '';
+                    badge.className = 'account-lookup-badge success';
+                    badge.innerHTML = `<span>✓</span> <span><strong>${customer.account_holder_name}</strong> (${typeDisplay}${balanceDisplay})</span>`;
+                }
+                
+                this.showNotification(`Account verified: ${customer.account_holder_name}`, 'success');
+                if (this.voiceEnabled) {
+                    this.speakText(`Customer ${customer.account_holder_name} verified`);
+                }
+                return customer;
+            } else {
+                // If not in database, give user clear feedback
+                if (badge) {
+                    badge.className = 'account-lookup-badge warning';
+                    badge.innerHTML = `<span>ℹ</span> <span>New account number. Please enter account holder name.</span>`;
+                }
+                return null;
+            }
+        } catch (error) {
+            console.error('Error fetching customer details:', error);
+            if (badge) {
+                badge.style.display = 'none';
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Scan barcode via API: GET /api/challan/scan/<barcode>/
+     * Called from scanner.js when a barcode is detected or entered manually.
+     */
+    async scanBarcode(barcodeValue) {
+        if (!barcodeValue || barcodeValue.trim() === '') {
+            this.showNotification('Please enter or scan a barcode', 'warning');
+            return null;
+        }
+        
+        const cleanBarcode = barcodeValue.trim().replace(/\s/g, '');
+        this.showLoadingSpinner('Looking up barcode...');
+        
+        try {
+            const response = await fetch(`${this.API_BASE_URL}/challan/scan/${encodeURIComponent(cleanBarcode)}/`, {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' },
+            });
+            
+            const result = await response.json();
+            this.hideLoadingSpinner();
+            
+            if (result.success) {
+                this.lastApiResponse = result;
+                this.populateFromScanResult(result);
+                this.showNotification('Customer details found!', 'success');
+                this.speakText('Customer details found successfully.');
+                return result;
+            } else {
+                this.showNotification(result.error || 'Barcode not found', 'error');
+                this.speakText('Barcode not found. Please try again.');
+                return null;
+            }
+        } catch (error) {
+            this.hideLoadingSpinner();
+            console.error('API Error:', error);
+            this.showNotification('Could not connect to server. Please check your connection.', 'error');
+            this.speakText('Server connection failed.');
+            return null;
+        }
+    }
+    
+    /**
+     * Create challan via API: POST /api/challan/create/
+     * Called when the user confirms the transaction.
+     */
+    async submitChallanToAPI() {
+        this.showLoadingSpinner('Generating Challan...');
+        
+        const payload = {
+            transaction_type: this.transactionData.type,
+            account_number: this.transactionData.accountNumber,
+            account_holder_name: this.transactionData.accountHolderName,
+            amount: parseFloat(this.transactionData.amount),
+        };
+        
+        try {
+            const response = await fetch(`${this.API_BASE_URL}/challan/create/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            });
+            
+            const result = await response.json();
+            this.hideLoadingSpinner();
+            
+            if (result.success) {
+                this.lastApiResponse = result;
+                // Show challan screen with API-generated data
+                this.showScreen('challan-screen');
+                this.generateChallanContentFromApi(result.data);
+                this.showNotification('Challan generated successfully!', 'success');
+                this.speakText('Challan generated successfully. You can now print or download your challan.');
+            } else {
+                this.showNotification(result.error || 'Failed to generate challan', 'error');
+                this.speakText('Failed to generate challan. ' + (result.error || ''));
+            }
+        } catch (error) {
+            this.hideLoadingSpinner();
+            console.error('API Error:', error);
+            // Fallback: generate locally
+            this.showNotification('Server unavailable — generating challan locally.', 'warning');
+            this.showScreen('challan-screen');
+            this.generateChallanContent();
+        }
+    }
+    
+    /**
+     * Populate UI fields from API scan result.
+     */
+    populateFromScanResult(result) {
+        const data = result.data;
+        
+        if (result.source === 'challan') {
+            // Came from a challan lookup
+            const acct = data.account;
+            const txn = data.transaction;
+            
+            this.transactionData.accountNumber = acct.account_number;
+            this.transactionData.accountHolderName = acct.account_holder_name;
+            this.transactionData.amount = txn.amount;
+            this.transactionData.type = txn.type.toLowerCase();
+            this.transactionData.timestamp = data.generated_at;
+            
+            // Auto-fill form inputs
+            this.fillAccountInputs(acct.account_number, acct.account_holder_name);
+            
+        } else if (result.source === 'account') {
+            // Came from an account number lookup
+            this.transactionData.accountNumber = data.account_number;
+            this.transactionData.accountHolderName = data.account_holder_name;
+            
+            // Auto-fill form inputs
+            this.fillAccountInputs(data.account_number, data.account_holder_name);
+        }
+    }
+    
+    fillAccountInputs(accountNumber, holderName) {
+        const accountInput = document.getElementById('account-number');
+        const confirmInput = document.getElementById('confirm-account-number');
+        const nameInput = document.getElementById('account-holder-name');
+        
+        if (accountInput) accountInput.value = accountNumber;
+        if (confirmInput) confirmInput.value = accountNumber;
+        if (nameInput) nameInput.value = holderName;
+    }
+    
+    /**
+     * Generate challan HTML from API response data (server-authoritative).
+     */
+    generateChallanContentFromApi(apiData) {
+        const challanDocument = document.getElementById('challan-document');
+        if (!challanDocument) return;
+        
+        const txn = apiData.transaction || {};
+        const acct = apiData.account || {};
+        const challanNumber = apiData.challan_number || this.generateChallanNumber();
+        const formattedAccount = (acct.account_number || this.transactionData.accountNumber)
+            .replace(/(\d{4})(\d{4})(\d{4})/, '$1 $2 $3');
+        const amount = txn.amount || this.transactionData.amount;
+        
+        const challanHTML = `
+            <div class="challan-header">
+                <div class="bank-info">
+                    <h2>Bank Challan Receipt</h2>
+                    <p>Official Bank Document</p>
+                </div>
+                <div class="challan-number">
+                    <p>Challan No: ${challanNumber}</p>
+                    <p class="barcode-ref">Barcode: ${apiData.barcode_number || challanNumber}</p>
+                </div>
+            </div>
+            
+            <div class="challan-details">
+                <div class="section">
+                    <h3>Transaction Details</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <label>Transaction Type:</label>
+                            <span>${txn.type || (this.transactionData.type ? this.transactionData.type.charAt(0).toUpperCase() + this.transactionData.type.slice(1) : '-')}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Transaction ID:</label>
+                            <span>${txn.transaction_id || 'N/A'}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Date:</label>
+                            <span>${txn.date || new Date().toLocaleDateString('en-IN')}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Time:</label>
+                            <span>${txn.time || new Date().toLocaleTimeString('en-IN')}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h3>Account Information</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <label>Account Number:</label>
+                            <span>${formattedAccount}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Account Holder:</label>
+                            <span>${acct.account_holder_name || this.transactionData.accountHolderName}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section amount-section">
+                    <h3>Amount Details</h3>
+                    <div class="amount-breakdown">
+                        <div class="amount-row">
+                            <label>Principal Amount:</label>
+                            <span>₹${parseInt(amount).toLocaleString('en-IN')}</span>
+                        </div>
+                        <div class="amount-row">
+                            <label>Processing Fee:</label>
+                            <span>₹0.00</span>
+                        </div>
+                        <div class="amount-row total">
+                            <label>Total Amount:</label>
+                            <span>₹${parseInt(amount).toLocaleString('en-IN')}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="challan-footer">
+                <div class="verification-info">
+                    <p>This is a computer-generated challan and is valid without signature.</p>
+                    <p>For any queries, please contact: 1800-123-4567</p>
+                </div>
+                <div class="barcode">
+                    <div class="barcode-lines"></div>
+                    <div class="barcode-number">${apiData.barcode_number || challanNumber}</div>
+                </div>
+            </div>
+        `;
+        
+        challanDocument.innerHTML = challanHTML;
+    }
+    
+    // Voice System
+    initializeVoice() {
+        // Check if speech synthesis is available
+        if ('speechSynthesis' in window) {
+            this.voiceEnabled = true;
+        } else {
+            this.voiceEnabled = false;
+            console.warn('Speech synthesis not supported');
+        }
+    }
+    
+    speakText(text) {
+        if (!this.voiceEnabled) return;
+
+        const spokenText = this.currentLanguage === 'ta' ? this.translateSpeech(text) : text;
+        if (window.voiceSystem && window.voiceSystem.speak) {
+            window.voiceSystem.speak(spokenText, { language: this.currentLanguage === 'ta' ? 'ta-IN' : 'en-IN' });
+            return;
+        }
+        
+        // Cancel any ongoing speech
+        window.speechSynthesis.cancel();
+        
+        const utterance = new SpeechSynthesisUtterance(spokenText);
+        utterance.lang = this.currentLanguage === 'ta' ? 'ta-IN' : 'en-IN';
+        utterance.rate = 0.9;
+        utterance.pitch = 1;
+        utterance.volume = 1;
+        
+        window.speechSynthesis.speak(utterance);
+    }
+
+    translateSpeech(text) {
+        const translations = {
+            'Welcome to Bank Challan Service. Please select a transaction type to begin.': 'வங்கி சலான் சேவைக்கு வரவேற்கிறோம். தொடங்க ஒரு பரிவர்த்தனை வகையைத் தேர்ந்தெடுக்கவும்.',
+            'Please enter the amount using the keypad or voice input.': 'விசைப்பலகை அல்லது குரல் உள்ளீட்டைப் பயன்படுத்தி தொகையை உள்ளிடவும்.',
+            'Please confirm your transaction details.': 'உங்கள் பரிவர்த்தனை விவரங்களை உறுதிப்படுத்தவும்.',
+            'Challan generated successfully. You can now print or download your challan.': 'சலான் வெற்றிகரமாக உருவாக்கப்பட்டது. இப்போது சலானை அச்சிடலாம் அல்லது பதிவிறக்கலாம்.',
+            'Please say the amount clearly': 'தொகையைத் தெளிவாகக் கூறவும்.',
+            'Could not understand the amount. Please try again.': 'தொகையைப் புரிந்துகொள்ள முடியவில்லை. மீண்டும் முயற்சிக்கவும்.'
+        };
+        if (translations[text]) return translations[text];
+        if (text.startsWith('You selected ')) {
+            const transaction = text.includes('Withdrawal') ? 'பணம் எடுத்தல்' : 'பணம் செலுத்தல்';
+            return `${transaction} தேர்ந்தெடுக்கப்பட்டது. உங்கள் கணக்கு எண்ணை உள்ளிடவும்.`;
+        }
+        if (text.startsWith('Amount set to ')) {
+            return `தொகை ${text.replace(/[^0-9]/g, '')} ரூபாய் என அமைக்கப்பட்டது.`;
+        }
+        if (text.startsWith('Session expiring in ')) {
+            return `அமர்வு ${text.replace(/[^0-9]/g, '')} விநாடிகளில் முடிவடைகிறது.`;
+        }
+        return text;
+    }
+
+    speakEnglishHelp() {
+        if (!this.voiceEnabled || !('speechSynthesis' in window)) return;
+        const helpText = 'English assistance is active. Select deposit or withdrawal to begin.';
+        if (window.voiceSystem && window.voiceSystem.speak) {
+            window.voiceSystem.speak(helpText, { language: 'en-IN' });
+            return;
+        }
+        const utterance = new SpeechSynthesisUtterance(helpText);
+        utterance.lang = 'en-IN';
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utterance);
+    }
+    
+    speakNumber(number) {
+        const numberToWords = (num) => {
+            const ones = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+            const tens = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+            const teens = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+            
+            if (num === 0) return 'zero';
+            if (num < 10) return ones[num];
+            if (num < 20) return teens[num - 10];
+            if (num < 100) {
+                const ten = Math.floor(num / 10);
+                const one = num % 10;
+                return tens[ten] + (one ? ' ' + ones[one] : '');
+            }
+            if (num < 1000) {
+                const hundred = Math.floor(num / 100);
+                const remainder = num % 100;
+                return ones[hundred] + ' hundred' + (remainder ? ' ' + numberToWords(remainder) : '');
+            }
+            if (num < 100000) {
+                const thousand = Math.floor(num / 1000);
+                const remainder = num % 1000;
+                return numberToWords(thousand) + ' thousand' + (remainder ? ' ' + numberToWords(remainder) : '');
+            }
+            
+            return num.toString();
+        };
+        
+        const words = numberToWords(number);
+        this.speakText(`${words} rupees`);
+    }
+    
+    // Voice Input for Amount
+    toggleVoiceInput() {
+        const voiceBtn = document.getElementById('voice-btn');
+        const voiceStatus = document.getElementById('voice-status');
+        
+        if (!this.recognition) {
+            this.initSpeechRecognition();
+        }
+        
+        if (this.isListening) {
+            this.stopVoiceInput();
+        } else {
+            this.startVoiceInput();
+        }
+    }
+    
+    initSpeechRecognition() {
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            this.recognition = new SpeechRecognition();
+            
+            this.recognition.continuous = false;
+            this.recognition.interimResults = false;
+            this.recognition.lang = 'en-IN';
+            
+            this.recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                this.processVoiceInput(transcript);
+            };
+            
+            this.recognition.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                this.stopVoiceInput();
+                this.showNotification('Voice input failed. Please try again.', 'error');
+            };
+            
+            this.recognition.onend = () => {
+                this.stopVoiceInput();
+            };
+        } else {
+            this.showNotification('Voice input not supported in this browser', 'warning');
+        }
+    }
+    
+    startVoiceInput() {
+        if (!this.recognition) {
+            this.showNotification('Voice input not available', 'warning');
+            return;
+        }
+        
+        const voiceBtn = document.getElementById('voice-btn');
+        const voiceStatus = document.getElementById('voice-status');
+        const statusIndicator = voiceStatus.querySelector('.status-indicator');
+        const statusText = voiceStatus.querySelector('.status-text');
+        
+        voiceBtn.classList.add('listening');
+        statusIndicator.classList.add('active');
+        statusText.textContent = 'Listening...';
+        
+        this.isListening = true;
+        this.recognition.start();
+        
+        // Visual feedback
+        this.speakText('Please say the amount clearly');
+    }
+    
+    stopVoiceInput() {
+        const voiceBtn = document.getElementById('voice-btn');
+        const voiceStatus = document.getElementById('voice-status');
+        const statusIndicator = voiceStatus.querySelector('.status-indicator');
+        const statusText = voiceStatus.querySelector('.status-text');
+        
+        if (voiceBtn) voiceBtn.classList.remove('listening');
+        if (statusIndicator) statusIndicator.classList.remove('active');
+        if (statusText) statusText.textContent = 'Ready to listen';
+        
+        this.isListening = false;
+        
+        if (this.recognition) {
+            this.recognition.stop();
+        }
+    }
+    
+    processVoiceInput(transcript) {
+        console.log('Voice input:', transcript);
+        
+        // Extract amount from voice input
+        const amount = this.extractAmountFromText(transcript);
+        
+        if (amount > 0) {
+            this.setAmount(amount);
+            this.showNotification(`Amount set: ₹${amount.toLocaleString('en-IN')}`, 'success');
+            this.speakText(`Amount set to ${amount} rupees`);
+        } else {
+            this.showNotification('Could not understand the amount. Please try again.', 'warning');
+            this.speakText('Could not understand the amount. Please try again.');
+        }
+    }
+    
+    extractAmountFromText(text) {
+        const numberWords = {
+            'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+            'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+            'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15,
+            'sixteen': 16, 'seventeen': 17, 'eighteen': 18, 'nineteen': 19, 'twenty': 20,
+            'thirty': 30, 'forty': 40, 'fifty': 50, 'sixty': 60, 'seventy': 70,
+            'eighty': 80, 'ninety': 90, 'hundred': 100, 'thousand': 1000,
+            'lakh': 100000, 'crore': 10000000
+        };
+        
+        // Look for numbers in the text
+        const numberMatch = text.match(/\d+/);
+        if (numberMatch) {
+            return parseInt(numberMatch[0]);
+        }
+        
+        // Convert words to numbers (simplified)
+        const words = text.toLowerCase().split(' ');
+        let amount = 0;
+        let current = 0;
+        
+        for (const word of words) {
+            if (numberWords[word] !== undefined) {
+                const value = numberWords[word];
+                if (value >= 100) {
+                    current = current === 0 ? value : current * value;
+                    amount += current;
+                    current = 0;
+                } else {
+                    current += value;
+                }
+            }
+        }
+        
+        return amount + current;
+    }
+    
+    // Barcode Scanner
+    checkCameraSupport() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            console.warn('Camera not supported');
+            return false;
+        }
+        return true;
+    }
+    
+    // Utility Functions
+    goBack() {
+        const screenFlow = ['welcome-screen', 'account-screen', 'amount-screen', 'confirmation-screen', 'challan-screen'];
+        const currentIndex = screenFlow.indexOf(this.currentScreen);
+        
+        if (currentIndex > 0) {
+            this.showScreen(screenFlow[currentIndex - 1]);
+        }
+    }
+    
+    showNotification(message, type = 'info') {
+        // Create notification element
+        const notification = document.createElement('div');
+        notification.className = `notification notification-${type} notification-slide-in`;
+        notification.innerHTML = `
+            <div class="notification-content">
+                <span class="notification-message">${message}</span>
+                <button class="notification-close" onclick="this.parentElement.parentElement.remove()">×</button>
+            </div>
+        `;
+        
+        // Add to page
+        document.body.appendChild(notification);
+        
+        // Auto-remove after 5 seconds
+        setTimeout(() => {
+            if (notification.parentElement) {
+                notification.classList.add('notification-slide-out');
+                setTimeout(() => notification.remove(), 300);
+            }
+        }, 5000);
+    }
+    
+    shakeElement(elementId) {
+        const element = document.getElementById(elementId);
+        if (element) {
+            element.classList.add('shake');
+            setTimeout(() => element.classList.remove('shake'), 500);
+        }
+    }
+    
+    showHelp() {
+        const modal = document.getElementById('help-modal');
+        if (modal) {
+            modal.style.display = 'block';
+            this.pauseSession();
+        }
+    }
+    
+    closeHelp() {
+        const modal = document.getElementById('help-modal');
+        if (modal) {
+            modal.style.display = 'none';
+            this.resumeSession();
+        }
+    }
+
+    openPreferences(id) {
+        const modal = document.getElementById(id);
+        if (!modal) return;
+        modal.hidden = false;
+        modal.style.display = 'block';
+        this.pauseSession();
+        const firstControl = modal.querySelector('select, input, button');
+        if (firstControl) firstControl.focus();
+    }
+
+    closePreferences(id) {
+        const modal = document.getElementById(id);
+        if (!modal) return;
+        modal.hidden = true;
+        modal.style.display = 'none';
+        this.resumeSession();
+    }
+
+    changeLanguage(language) {
+        const translations = {
+            en: { language: 'Language', accessibility: 'Accessibility', chooseLanguage: 'Choose language', accessibilityOptions: 'Accessibility options', largeText: 'Large text', highContrast: 'High contrast', reducedMotion: 'Reduce motion', voiceGuidance: 'Voice guidance', englishHelp: 'Speak English help' },
+            ta: { language: 'மொழி', accessibility: 'அணுகல்தன்மை', chooseLanguage: 'மொழியைத் தேர்ந்தெடுக்கவும்', accessibilityOptions: 'அணுகல்தன்மை விருப்பங்கள்', largeText: 'பெரிய எழுத்து', highContrast: 'உயர் மாறுபாடு', reducedMotion: 'குறைந்த இயக்கம்', voiceGuidance: 'குரல் வழிகாட்டுதல்', englishHelp: 'ஆங்கில உதவியைப் பேசவும்' }
+        };
+        if (!translations[language]) return;
+        this.currentLanguage = language;
+        document.documentElement.lang = language === 'ta' ? 'ta' : 'en';
+        document.querySelectorAll('[data-i18n]').forEach((element) => {
+            element.textContent = translations[language][element.dataset.i18n];
+        });
+        localStorage.setItem('language', language);
+        const select = document.getElementById('language-select');
+        if (select) select.value = language;
+        if (window.voiceSystem && window.voiceSystem.setLanguage) {
+            window.voiceSystem.setLanguage(language === 'ta' ? 'ta-IN' : 'en-IN');
+        }
+    }
+
+    updateAccessibility(setting, enabled) {
+        const className = `accessibility-${setting.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+        document.body.classList.toggle(className, enabled);
+        localStorage.setItem(`accessibility-${setting}`, enabled);
+        if (setting === 'voice') this.voiceEnabled = enabled;
+        if (setting === 'voice' && !enabled && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+    }
+
+    loadAccessibilityPreferences() {
+        ['largeText', 'highContrast', 'reducedMotion'].forEach((setting) => {
+            const enabled = localStorage.getItem(`accessibility-${setting}`) === 'true';
+            this.updateAccessibility(setting, enabled);
+            const toggle = document.getElementById(`${setting.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}-toggle`);
+            if (toggle) toggle.checked = enabled;
+        });
+        const savedVoice = localStorage.getItem('accessibility-voice');
+        if (savedVoice !== null) {
+            this.updateAccessibility('voice', savedVoice === 'true');
+            const voiceToggle = document.getElementById('voice-toggle');
+            if (voiceToggle) voiceToggle.checked = savedVoice === 'true';
+        }
+    }
+    
+    loadUserPreferences() {
+        // Load saved preferences from localStorage
+        const savedVoice = localStorage.getItem('voiceEnabled');
+        if (savedVoice !== null) {
+            this.voiceEnabled = savedVoice === 'true';
+        }
+        
+        const savedLanguage = localStorage.getItem('language');
+        if (savedLanguage) {
+            this.currentLanguage = savedLanguage === 'ta' ? 'ta' : 'en';
+        }
+        this.changeLanguage(this.currentLanguage);
+        this.loadAccessibilityPreferences();
+    }
+    
+    saveUserPreferences() {
+        localStorage.setItem('voiceEnabled', this.voiceEnabled);
+        localStorage.setItem('language', this.currentLanguage);
+    }
+}
+
+// Initialize the application when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    window.challanApp = new ChallanApp();
+});
+
+// Global functions for HTML onclick handlers
+function selectTransactionType(type) {
+    window.challanApp.selectTransactionType(type);
+}
+
+function proceedToAmount() {
+    window.challanApp.proceedToAmount();
+}
+
+function setInputMethod(method) {
+    window.challanApp.setInputMethod(method);
+}
+
+function addDigit(digit) {
+    window.challanApp.addDigit(digit);
+}
+
+function setAmount(amount) {
+    window.challanApp.setAmount(amount);
+}
+
+function clearAmount() {
+    window.challanApp.clearAmount();
+}
+
+function proceedToConfirmation() {
+    window.challanApp.proceedToConfirmation();
+}
+
+function generateChallan() {
+    window.challanApp.generateChallan();
+}
+
+function goBack() {
+    window.challanApp.goBack();
+}
+
+function showHelp() {
+    window.challanApp.showHelp();
+}
+
+function closeHelp() {
+    window.challanApp.closeHelp();
+}
+
+function showLanguageSelector() {
+    window.challanApp.openPreferences('language-modal');
+}
+
+function showAccessibilityOptions() {
+    window.challanApp.openPreferences('accessibility-modal');
+}
+
+function closePreferences(id) {
+    window.challanApp.closePreferences(id);
+}
+
+function changeLanguage(language) {
+    window.challanApp.changeLanguage(language);
+}
+
+function updateAccessibility(setting, enabled) {
+    window.challanApp.updateAccessibility(setting, enabled);
+}
+
+function speakEnglishHelp() {
+    window.challanApp.speakEnglishHelp();
+}
+
+function toggleVoiceInput() {
+    window.challanApp.toggleVoiceInput();
+}
+
+// Modal close on outside click
+window.onclick = function(event) {
+    const modal = document.getElementById('help-modal');
+    if (event.target === modal) {
+        closeHelp();
+    }
+    ['language-modal', 'accessibility-modal'].forEach((id) => {
+        const preferenceModal = document.getElementById(id);
+        if (event.target === preferenceModal) closePreferences(id);
+    });
+}

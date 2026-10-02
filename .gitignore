@@ -177,9 +177,9 @@ Thumbs.db
 media/*
 !media/.gitkeep
 
-# Static files (collected)
+# Static files (collected by collectstatic - not source files)
 staticfiles/
-static/
+# NOTE: static/ is NOT ignored - it contains source CSS/JS/assets
 
 # SSL certificates
 ssl/
