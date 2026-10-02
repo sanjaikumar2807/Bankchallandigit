@@ -14,8 +14,26 @@ class ChallanApp {
         this.sessionInterval = null;
         this.voiceEnabled = true;
         this.currentLanguage = 'en';
+        this.isLoading = false;
+        
+        // API Configuration — auto-detect Django backend
+        this.API_BASE_URL = this.detectApiBaseUrl();
+        
+        // Store last API response for printing
+        this.lastApiResponse = null;
         
         this.initializeApp();
+    }
+    
+    detectApiBaseUrl() {
+        // If served from Django (same origin), use relative paths
+        const currentOrigin = window.location.origin;
+        if (currentOrigin.includes('localhost') || currentOrigin.includes('127.0.0.1')) {
+            // Local development — use the Django dev server
+            return 'http://127.0.0.1:8000/api';
+        }
+        // Production: assume same origin (Django serves everything)
+        return `${currentOrigin}/api`;
     }
     
     initializeApp() {
@@ -100,16 +118,38 @@ class ChallanApp {
         if (accountInput) {
             accountInput.addEventListener('input', (e) => {
                 // Only allow numbers
-                e.target.value = e.target.value.replace(/[^0-9]/g, '');
+                const rawVal = e.target.value.replace(/[^0-9]/g, '');
+                e.target.value = rawVal;
+                e.target.dataset.actualValue = rawVal;
                 
-                // Auto-format with spaces for readability
-                if (e.target.value.length > 0) {
-                    const formatted = e.target.value.replace(/(\d{4})(\d{4})(\d{4})/, '$1 $2 $3');
-                    if (formatted !== e.target.value) {
-                        // Store actual value without spaces
-                        e.target.dataset.actualValue = e.target.value;
+                // When exactly 12 digits are typed, automatically fetch customer name
+                if (rawVal.length === 12) {
+                    this.fetchCustomerByAccountNumber(rawVal);
+                } else {
+                    const badge = document.getElementById('account-lookup-badge');
+                    if (badge && rawVal.length < 12) {
+                        badge.style.display = 'none';
+                    }
+                    if (rawVal.length !== 12) {
+                        this._lastFetchedAccount = null;
                     }
                 }
+            });
+
+            accountInput.addEventListener('blur', (e) => {
+                const rawVal = (e.target.dataset.actualValue || e.target.value).replace(/[^0-9]/g, '');
+                if (rawVal.length === 12) {
+                    this.fetchCustomerByAccountNumber(rawVal);
+                }
+            });
+
+            accountInput.addEventListener('paste', (e) => {
+                setTimeout(() => {
+                    const rawVal = e.target.value.replace(/[^0-9]/g, '');
+                    if (rawVal.length === 12) {
+                        this.fetchCustomerByAccountNumber(rawVal);
+                    }
+                }, 50);
             });
         }
         
@@ -469,7 +509,7 @@ class ChallanApp {
         }
     }
     
-    generateChallan() {
+    async generateChallan() {
         // Check if confirmation checkbox is checked
         const confirmCheckbox = document.getElementById('confirm-checkbox');
         if (!confirmCheckbox || !confirmCheckbox.checked) {
@@ -478,9 +518,8 @@ class ChallanApp {
             return;
         }
         
-        // Show challan screen
-        this.showScreen('challan-screen');
-        this.speakText('Challan generated successfully. You can now print or download your challan.');
+        // Submit to API
+        await this.submitChallanToAPI();
     }
     
     generateChallanContent() {
@@ -574,6 +613,344 @@ class ChallanApp {
         const timestamp = Date.now();
         const random = Math.floor(Math.random() * 10000);
         return `CH${timestamp}${random}`;
+    }
+    
+    // ==========================================
+    // API Integration Methods
+    // ==========================================
+    
+    showLoadingSpinner(message = 'Processing...') {
+        this.isLoading = true;
+        // Remove any existing spinner
+        this.hideLoadingSpinner();
+        
+        const overlay = document.createElement('div');
+        overlay.id = 'loading-overlay';
+        overlay.className = 'loading-overlay';
+        overlay.innerHTML = `
+            <div class="loading-spinner-container">
+                <div class="loading-spinner"></div>
+                <p class="loading-message">${message}</p>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+    }
+    
+    hideLoadingSpinner() {
+        this.isLoading = false;
+        const overlay = document.getElementById('loading-overlay');
+        if (overlay) {
+            overlay.classList.add('fade-out');
+            setTimeout(() => overlay.remove(), 300);
+        }
+    }
+    
+    /**
+     * Automatically fetch customer name and details by account number.
+     * Hits GET /api/transaction/validate/?account_number=<number>
+     * and auto-populates the account holder name and confirmation inputs.
+     */
+    async fetchCustomerByAccountNumber(accountNumber) {
+        if (!accountNumber) return null;
+        const clean = accountNumber.toString().trim().replace(/[^0-9]/g, '');
+        if (clean.length !== 12) return null;
+        
+        // Prevent duplicate calls if already fetched
+        if (this._lastFetchedAccount === clean) return null;
+        
+        const nameInput = document.getElementById('account-holder-name');
+        const confirmInput = document.getElementById('confirm-account-number');
+        const badge = document.getElementById('account-lookup-badge');
+        
+        if (badge) {
+            badge.style.display = 'inline-flex';
+            badge.className = 'account-lookup-badge loading';
+            badge.innerHTML = '<span>⏳</span> <span>Looking up customer details...</span>';
+        }
+        
+        try {
+            const response = await fetch(`${this.API_BASE_URL}/transaction/validate/?account_number=${encodeURIComponent(clean)}`, {
+                headers: { 'Accept': 'application/json' }
+            });
+            const data = await response.json();
+            
+            if (data.success && data.data) {
+                this._lastFetchedAccount = clean;
+                const customer = data.data;
+                
+                // Automatically populate Account Holder Name
+                if (nameInput) {
+                    nameInput.value = customer.account_holder_name;
+                    nameInput.classList.add('auto-filled-highlight');
+                    setTimeout(() => nameInput.classList.remove('auto-filled-highlight'), 1800);
+                }
+                
+                // Automatically populate Confirm Account Number
+                if (confirmInput) {
+                    confirmInput.value = clean;
+                }
+                
+                // Update transaction data state
+                this.transactionData.accountNumber = clean;
+                this.transactionData.accountHolderName = customer.account_holder_name;
+                
+                // Display success badge
+                if (badge) {
+                    const typeDisplay = customer.account_type ? customer.account_type.toUpperCase() : 'SAVINGS';
+                    const balanceDisplay = (customer.balance !== undefined) 
+                        ? ` &bull; Balance: ₹${Number(customer.balance).toLocaleString('en-IN')}` 
+                        : '';
+                    badge.className = 'account-lookup-badge success';
+                    badge.innerHTML = `<span>✓</span> <span><strong>${customer.account_holder_name}</strong> (${typeDisplay}${balanceDisplay})</span>`;
+                }
+                
+                this.showNotification(`Account verified: ${customer.account_holder_name}`, 'success');
+                if (this.voiceEnabled) {
+                    this.speakText(`Customer ${customer.account_holder_name} verified`);
+                }
+                return customer;
+            } else {
+                // If not in database, give user clear feedback
+                if (badge) {
+                    badge.className = 'account-lookup-badge warning';
+                    badge.innerHTML = `<span>ℹ</span> <span>New account number. Please enter account holder name.</span>`;
+                }
+                return null;
+            }
+        } catch (error) {
+            console.error('Error fetching customer details:', error);
+            if (badge) {
+                badge.style.display = 'none';
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Scan barcode via API: GET /api/challan/scan/<barcode>/
+     * Called from scanner.js when a barcode is detected or entered manually.
+     */
+    async scanBarcode(barcodeValue) {
+        if (!barcodeValue || barcodeValue.trim() === '') {
+            this.showNotification('Please enter or scan a barcode', 'warning');
+            return null;
+        }
+        
+        const cleanBarcode = barcodeValue.trim().replace(/\s/g, '');
+        this.showLoadingSpinner('Looking up barcode...');
+        
+        try {
+            const response = await fetch(`${this.API_BASE_URL}/challan/scan/${encodeURIComponent(cleanBarcode)}/`, {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' },
+            });
+            
+            const result = await response.json();
+            this.hideLoadingSpinner();
+            
+            if (result.success) {
+                this.lastApiResponse = result;
+                this.populateFromScanResult(result);
+                this.showNotification('Customer details found!', 'success');
+                this.speakText('Customer details found successfully.');
+                return result;
+            } else {
+                this.showNotification(result.error || 'Barcode not found', 'error');
+                this.speakText('Barcode not found. Please try again.');
+                return null;
+            }
+        } catch (error) {
+            this.hideLoadingSpinner();
+            console.error('API Error:', error);
+            this.showNotification('Could not connect to server. Please check your connection.', 'error');
+            this.speakText('Server connection failed.');
+            return null;
+        }
+    }
+    
+    /**
+     * Create challan via API: POST /api/challan/create/
+     * Called when the user confirms the transaction.
+     */
+    async submitChallanToAPI() {
+        this.showLoadingSpinner('Generating Challan...');
+        
+        const payload = {
+            transaction_type: this.transactionData.type,
+            account_number: this.transactionData.accountNumber,
+            account_holder_name: this.transactionData.accountHolderName,
+            amount: parseFloat(this.transactionData.amount),
+        };
+        
+        try {
+            const response = await fetch(`${this.API_BASE_URL}/challan/create/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            });
+            
+            const result = await response.json();
+            this.hideLoadingSpinner();
+            
+            if (result.success) {
+                this.lastApiResponse = result;
+                // Show challan screen with API-generated data
+                this.showScreen('challan-screen');
+                this.generateChallanContentFromApi(result.data);
+                this.showNotification('Challan generated successfully!', 'success');
+                this.speakText('Challan generated successfully. You can now print or download your challan.');
+            } else {
+                this.showNotification(result.error || 'Failed to generate challan', 'error');
+                this.speakText('Failed to generate challan. ' + (result.error || ''));
+            }
+        } catch (error) {
+            this.hideLoadingSpinner();
+            console.error('API Error:', error);
+            // Fallback: generate locally
+            this.showNotification('Server unavailable — generating challan locally.', 'warning');
+            this.showScreen('challan-screen');
+            this.generateChallanContent();
+        }
+    }
+    
+    /**
+     * Populate UI fields from API scan result.
+     */
+    populateFromScanResult(result) {
+        const data = result.data;
+        
+        if (result.source === 'challan') {
+            // Came from a challan lookup
+            const acct = data.account;
+            const txn = data.transaction;
+            
+            this.transactionData.accountNumber = acct.account_number;
+            this.transactionData.accountHolderName = acct.account_holder_name;
+            this.transactionData.amount = txn.amount;
+            this.transactionData.type = txn.type.toLowerCase();
+            this.transactionData.timestamp = data.generated_at;
+            
+            // Auto-fill form inputs
+            this.fillAccountInputs(acct.account_number, acct.account_holder_name);
+            
+        } else if (result.source === 'account') {
+            // Came from an account number lookup
+            this.transactionData.accountNumber = data.account_number;
+            this.transactionData.accountHolderName = data.account_holder_name;
+            
+            // Auto-fill form inputs
+            this.fillAccountInputs(data.account_number, data.account_holder_name);
+        }
+    }
+    
+    fillAccountInputs(accountNumber, holderName) {
+        const accountInput = document.getElementById('account-number');
+        const confirmInput = document.getElementById('confirm-account-number');
+        const nameInput = document.getElementById('account-holder-name');
+        
+        if (accountInput) accountInput.value = accountNumber;
+        if (confirmInput) confirmInput.value = accountNumber;
+        if (nameInput) nameInput.value = holderName;
+    }
+    
+    /**
+     * Generate challan HTML from API response data (server-authoritative).
+     */
+    generateChallanContentFromApi(apiData) {
+        const challanDocument = document.getElementById('challan-document');
+        if (!challanDocument) return;
+        
+        const txn = apiData.transaction || {};
+        const acct = apiData.account || {};
+        const challanNumber = apiData.challan_number || this.generateChallanNumber();
+        const formattedAccount = (acct.account_number || this.transactionData.accountNumber)
+            .replace(/(\d{4})(\d{4})(\d{4})/, '$1 $2 $3');
+        const amount = txn.amount || this.transactionData.amount;
+        
+        const challanHTML = `
+            <div class="challan-header">
+                <div class="bank-info">
+                    <h2>Bank Challan Receipt</h2>
+                    <p>Official Bank Document</p>
+                </div>
+                <div class="challan-number">
+                    <p>Challan No: ${challanNumber}</p>
+                    <p class="barcode-ref">Barcode: ${apiData.barcode_number || challanNumber}</p>
+                </div>
+            </div>
+            
+            <div class="challan-details">
+                <div class="section">
+                    <h3>Transaction Details</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <label>Transaction Type:</label>
+                            <span>${txn.type || (this.transactionData.type ? this.transactionData.type.charAt(0).toUpperCase() + this.transactionData.type.slice(1) : '-')}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Transaction ID:</label>
+                            <span>${txn.transaction_id || 'N/A'}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Date:</label>
+                            <span>${txn.date || new Date().toLocaleDateString('en-IN')}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Time:</label>
+                            <span>${txn.time || new Date().toLocaleTimeString('en-IN')}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h3>Account Information</h3>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <label>Account Number:</label>
+                            <span>${formattedAccount}</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Account Holder:</label>
+                            <span>${acct.account_holder_name || this.transactionData.accountHolderName}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section amount-section">
+                    <h3>Amount Details</h3>
+                    <div class="amount-breakdown">
+                        <div class="amount-row">
+                            <label>Principal Amount:</label>
+                            <span>₹${parseInt(amount).toLocaleString('en-IN')}</span>
+                        </div>
+                        <div class="amount-row">
+                            <label>Processing Fee:</label>
+                            <span>₹0.00</span>
+                        </div>
+                        <div class="amount-row total">
+                            <label>Total Amount:</label>
+                            <span>₹${parseInt(amount).toLocaleString('en-IN')}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="challan-footer">
+                <div class="verification-info">
+                    <p>This is a computer-generated challan and is valid without signature.</p>
+                    <p>For any queries, please contact: 1800-123-4567</p>
+                </div>
+                <div class="barcode">
+                    <div class="barcode-lines"></div>
+                    <div class="barcode-number">${apiData.barcode_number || challanNumber}</div>
+                </div>
+            </div>
+        `;
+        
+        challanDocument.innerHTML = challanHTML;
     }
     
     // Voice System

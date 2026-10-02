@@ -557,12 +557,55 @@ window.thermalPrinter = new ThermalPrinter();
 
 // Global functions for HTML onclick handlers
 function printChallan() {
-    const challanData = window.challanApp.transactionData;
+    let challanData;
+    
+    // Use API response data if available, otherwise fall back to local data
+    if (window.challanApp && window.challanApp.lastApiResponse && window.challanApp.lastApiResponse.data) {
+        const apiData = window.challanApp.lastApiResponse.data;
+        const txn = apiData.transaction || {};
+        const acct = apiData.account || {};
+        
+        challanData = {
+            type: txn.type || window.challanApp.transactionData.type || 'deposit',
+            accountNumber: acct.account_number || window.challanApp.transactionData.accountNumber,
+            accountHolderName: acct.account_holder_name || window.challanApp.transactionData.accountHolderName,
+            amount: txn.amount || window.challanApp.transactionData.amount,
+            timestamp: apiData.generated_at || window.challanApp.transactionData.timestamp || new Date().toISOString(),
+            challanNumber: apiData.challan_number,
+            barcodeNumber: apiData.barcode_number,
+            transactionId: txn.transaction_id,
+        };
+    } else {
+        challanData = window.challanApp.transactionData;
+        challanData.timestamp = challanData.timestamp || new Date().toISOString();
+    }
+    
     window.thermalPrinter.printChallan(challanData);
 }
 
 function downloadChallan() {
-    const challanData = window.challanApp.transactionData;
+    let challanData;
+    
+    if (window.challanApp && window.challanApp.lastApiResponse && window.challanApp.lastApiResponse.data) {
+        const apiData = window.challanApp.lastApiResponse.data;
+        const txn = apiData.transaction || {};
+        const acct = apiData.account || {};
+        
+        challanData = {
+            type: txn.type || window.challanApp.transactionData.type || 'deposit',
+            accountNumber: acct.account_number || window.challanApp.transactionData.accountNumber,
+            accountHolderName: acct.account_holder_name || window.challanApp.transactionData.accountHolderName,
+            amount: txn.amount || window.challanApp.transactionData.amount,
+            timestamp: apiData.generated_at || window.challanApp.transactionData.timestamp || new Date().toISOString(),
+            challanNumber: apiData.challan_number,
+            barcodeNumber: apiData.barcode_number,
+            transactionId: txn.transaction_id,
+        };
+    } else {
+        challanData = window.challanApp.transactionData;
+        challanData.timestamp = challanData.timestamp || new Date().toISOString();
+    }
+    
     window.thermalPrinter.downloadChallanPDF(challanData);
 }
 

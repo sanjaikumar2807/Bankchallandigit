@@ -207,17 +207,8 @@ class BarcodeScanner {
     handleScanResult(result) {
         console.log('Barcode scanned:', result);
         
-        // Validate account number format
-        if (!this.validateAccountNumber(result.data)) {
-            this.showScanError('Invalid account number format');
-            return;
-        }
-        
         // Add to scan history
         this.addToScanHistory(result);
-        
-        // Auto-fill account number
-        this.autoFillAccountNumber(result.data);
         
         // Show success feedback
         this.showScanSuccess(result);
@@ -226,13 +217,29 @@ class BarcodeScanner {
         setTimeout(() => {
             this.stopScanner();
             this.hideScannerSection();
-        }, 1000);
+        }, 500);
         
         // Play success sound
         this.playSuccessSound();
         
         // Vibrate if supported
         this.vibrate();
+        
+        // Call the Django API to look up the barcode
+        if (window.challanApp && window.challanApp.scanBarcode) {
+            window.challanApp.scanBarcode(result.data).then((apiResult) => {
+                if (apiResult) {
+                    // API found a match — fields are already populated by populateFromScanResult
+                    console.log('API scan result:', apiResult);
+                } else {
+                    // API didn't find it — just autofill as raw account number
+                    this.autoFillAccountNumber(result.data);
+                }
+            });
+        } else {
+            // Fallback: just fill the form inputs locally
+            this.autoFillAccountNumber(result.data);
+        }
     }
     
     validateAccountNumber(accountNumber) {
@@ -275,19 +282,21 @@ class BarcodeScanner {
     }
     
     showScanSuccess(result) {
-        const message = `Account number scanned: ${result.data}`;
-        window.challanApp.showNotification(message, 'success');
-        
-        if (window.challanApp.voiceEnabled) {
-            window.challanApp.speakText('Account number scanned successfully');
+        const message = `Barcode scanned: ${result.data}`;
+        if (window.challanApp) {
+            window.challanApp.showNotification(message, 'success');
+            if (window.challanApp.voiceEnabled) {
+                window.challanApp.speakText('Barcode scanned successfully. Looking up details.');
+            }
         }
     }
     
     showScanError(message) {
-        window.challanApp.showNotification(message, 'error');
-        
-        if (window.challanApp.voiceEnabled) {
-            window.challanApp.speakText('Invalid barcode. Please try again.');
+        if (window.challanApp) {
+            window.challanApp.showNotification(message, 'error');
+            if (window.challanApp.voiceEnabled) {
+                window.challanApp.speakText('Invalid barcode. Please try again.');
+            }
         }
     }
     
@@ -304,27 +313,32 @@ class BarcodeScanner {
             errorMessage = 'Camera not supported in this browser.';
         }
         
-        window.challanApp.showNotification(errorMessage, 'error');
+        if (window.challanApp) {
+            window.challanApp.showNotification(errorMessage, 'error');
+        }
         this.hideScannerSection();
     }
     
     playSuccessSound() {
-        // Create a simple beep sound
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const oscillator = audioContext.createOscillator();
-        const gainNode = audioContext.createGain();
-        
-        oscillator.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        
-        oscillator.frequency.value = 1000;
-        oscillator.type = 'sine';
-        
-        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
-        
-        oscillator.start(audioContext.currentTime);
-        oscillator.stop(audioContext.currentTime + 0.1);
+        try {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            
+            oscillator.frequency.value = 1000;
+            oscillator.type = 'sine';
+            
+            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
+            
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.1);
+        } catch (e) {
+            // Audio context may fail silently
+        }
     }
     
     vibrate() {
@@ -472,7 +486,7 @@ async function startBarcodeScanner() {
     if (success) {
         window.barcodeScanner.showScannerSection();
         
-        if (window.challanApp.voiceEnabled) {
+        if (window.challanApp && window.challanApp.voiceEnabled) {
             window.challanApp.speakText('Position the barcode in front of the camera');
         }
     }
@@ -486,6 +500,26 @@ function stopScanner() {
 function captureScan() {
     // Manual capture trigger (if needed)
     console.log('Manual capture triggered');
+}
+
+/**
+ * Manual barcode entry: user types a barcode/account number and hits "Lookup".
+ * Called from the HTML manual barcode input field.
+ */
+async function manualBarcodeLookup() {
+    const input = document.getElementById('manual-barcode-input');
+    if (!input || !input.value.trim()) {
+        if (window.challanApp) {
+            window.challanApp.showNotification('Please enter a barcode or account number', 'warning');
+        }
+        return;
+    }
+    
+    const barcode = input.value.trim();
+    
+    if (window.challanApp && window.challanApp.scanBarcode) {
+        await window.challanApp.scanBarcode(barcode);
+    }
 }
 
 // File upload handler

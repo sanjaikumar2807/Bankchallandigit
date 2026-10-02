@@ -863,3 +863,46 @@
         display: block !important;
     }
 }
+
+/* Account Auto-Lookup Status Badge */
+.account-lookup-badge {
+    margin-top: 8px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.3s ease;
+}
+
+.account-lookup-badge.loading {
+    background: #e8f0fe;
+    color: #1a73e8;
+    border: 1px solid #c2e7ff;
+}
+
+.account-lookup-badge.success {
+    background: #e6f4ea;
+    color: #137333;
+    border: 1px solid #ceead6;
+}
+
+.account-lookup-badge.warning {
+    background: #fef7e0;
+    color: #b06000;
+    border: 1px solid #feefc3;
+}
+
+.auto-filled-highlight {
+    animation: highlightPulse 1.5s ease-in-out;
+    border-color: #137333 !important;
+    box-shadow: 0 0 0 3px rgba(19, 115, 51, 0.25) !important;
+}
+
+@keyframes highlightPulse {
+    0% { background-color: #e6f4ea; }
+    100% { background-color: #ffffff; }
+}
+

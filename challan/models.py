@@ -119,6 +119,7 @@ class Challan(models.Model):
     
     transaction = models.OneToOneField(Transaction, on_delete=models.CASCADE, related_name='challan')
     challan_number = models.CharField(max_length=20, unique=True, db_index=True)
+    barcode_number = models.CharField(max_length=30, unique=True, db_index=True, blank=True)
     pdf_file = models.FileField(upload_to='challans/pdf/', null=True, blank=True)
     printed = models.BooleanField(default=False)
     print_count = models.PositiveIntegerField(default=0)
@@ -137,6 +138,7 @@ class Challan(models.Model):
         ordering = ['-generated_at']
         indexes = [
             models.Index(fields=['challan_number']),
+            models.Index(fields=['barcode_number']),
             models.Index(fields=['generated_at']),
         ]
     
@@ -146,6 +148,8 @@ class Challan(models.Model):
     def save(self, *args, **kwargs):
         if not self.challan_number:
             self.challan_number = self.generate_challan_number()
+        if not self.barcode_number:
+            self.barcode_number = self.challan_number
         super().save(*args, **kwargs)
     
     def generate_challan_number(self):

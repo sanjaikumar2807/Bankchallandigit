@@ -21,6 +21,223 @@ from .utils import validate_account_number, validate_amount, generate_session_id
 logger = logging.getLogger(__name__)
 
 
+@require_http_methods(["GET"])
+def scan_challan(request, barcode_number):
+    """
+    Scan endpoint: look up a challan by its barcode_number.
+    URL: /api/challan/scan/<barcode_number>/
+    Returns full challan + transaction + account details as JSON.
+    """
+    try:
+        # Try exact match on barcode_number first
+        try:
+            challan_obj = Challan.objects.select_related(
+                'transaction', 'transaction__account'
+            ).get(barcode_number=barcode_number)
+        except Challan.DoesNotExist:
+            # Fallback: try matching by challan_number
+            try:
+                challan_obj = Challan.objects.select_related(
+                    'transaction', 'transaction__account'
+                ).get(challan_number=barcode_number)
+            except Challan.DoesNotExist:
+                # Also try looking up by account number
+                try:
+                    account = Account.objects.get(account_number=barcode_number.replace(' ', ''))
+                    latest_txn = Transaction.objects.filter(
+                        account=account
+                    ).order_by('-created_at').first()
+
+                    return JsonResponse({
+                        'success': True,
+                        'source': 'account',
+                        'data': {
+                            'account_number': account.account_number,
+                            'account_holder_name': account.account_holder_name,
+                            'account_type': account.account_type,
+                            'balance': float(account.balance),
+                            'is_active': account.is_active,
+                            'last_transaction': {
+                                'transaction_id': latest_txn.transaction_id,
+                                'type': latest_txn.get_transaction_type_display(),
+                                'amount': float(latest_txn.amount),
+                                'status': latest_txn.status,
+                                'date': latest_txn.created_at.isoformat(),
+                            } if latest_txn else None
+                        }
+                    })
+                except Account.DoesNotExist:
+                    return JsonResponse({
+                        'success': False,
+                        'error': 'Barcode not found. No matching challan or account exists.'
+                    }, status=404)
+
+        txn = challan_obj.transaction
+        acct = txn.account
+
+        return JsonResponse({
+            'success': True,
+            'source': 'challan',
+            'data': {
+                'challan_number': challan_obj.challan_number,
+                'barcode_number': challan_obj.barcode_number,
+                'content': challan_obj.content,
+                'printed': challan_obj.printed,
+                'print_count': challan_obj.print_count,
+                'generated_at': challan_obj.generated_at.isoformat(),
+                'transaction': {
+                    'transaction_id': txn.transaction_id,
+                    'type': txn.get_transaction_type_display(),
+                    'amount': float(txn.amount),
+                    'status': txn.status,
+                    'date': txn.created_at.strftime('%d-%m-%Y'),
+                    'time': txn.created_at.strftime('%H:%M:%S'),
+                },
+                'account': {
+                    'account_number': acct.account_number,
+                    'account_holder_name': acct.account_holder_name,
+                    'account_type': acct.account_type,
+                    'balance': float(acct.balance),
+                }
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"Error scanning challan: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'error': 'Internal server error'
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def create_challan_api(request):
+    """
+    Create a new challan directly from the frontend.
+    URL: /api/challan/create/
+    Expects JSON body with: transaction_type, account_number,
+    account_holder_name, amount, and optionally description.
+    Creates Account (if needed), Transaction, and Challan in one atomic operation.
+    """
+    try:
+        data = json.loads(request.body)
+
+        # Validate required fields
+        required_fields = ['transaction_type', 'account_number', 'account_holder_name', 'amount']
+        for field in required_fields:
+            if not data.get(field):
+                return JsonResponse({
+                    'success': False,
+                    'error': f'{field} is required'
+                }, status=400)
+
+        # Validate account number
+        from .utils import validate_account_number, validate_amount
+        acct_num = data['account_number'].replace(' ', '')
+        if not validate_account_number(acct_num):
+            return JsonResponse({
+                'success': False,
+                'error': 'Invalid account number format (must be 12 digits)'
+            }, status=400)
+
+        if not validate_amount(data['amount']):
+            return JsonResponse({
+                'success': False,
+                'error': 'Invalid amount (must be between ₹1 and ₹10,00,000)'
+            }, status=400)
+
+        with transaction.atomic():
+            # Get or create account
+            account, _ = Account.objects.get_or_create(
+                account_number=acct_num,
+                defaults={
+                    'account_holder_name': data['account_holder_name'],
+                    'account_type': data.get('account_type', 'savings'),
+                }
+            )
+
+            # Create transaction
+            txn = Transaction.objects.create(
+                account=account,
+                transaction_type=data['transaction_type'],
+                amount=data['amount'],
+                description=data.get('description', ''),
+                status='completed',
+                completed_at=timezone.now(),
+                ip_address=get_client_ip(request),
+                user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            )
+
+            # Update account balance
+            if data['transaction_type'] == 'deposit':
+                account.balance += data['amount']
+            elif data['transaction_type'] == 'withdrawal':
+                if account.balance >= data['amount']:
+                    account.balance -= data['amount']
+                else:
+                    raise ValueError('Insufficient balance')
+            account.save()
+
+            # Generate challan content
+            challan_content = generate_challan_content(txn)
+
+            # Create challan
+            challan_obj = Challan.objects.create(
+                transaction=txn,
+                content=challan_content,
+            )
+
+            # Log
+            SystemLog.objects.create(
+                level='INFO',
+                message=f'Challan created via API: {challan_obj.challan_number}',
+                module='views',
+                function_name='create_challan_api',
+                ip_address=get_client_ip(request),
+            )
+
+            return JsonResponse({
+                'success': True,
+                'data': {
+                    'challan_number': challan_obj.challan_number,
+                    'barcode_number': challan_obj.barcode_number,
+                    'transaction_id': txn.transaction_id,
+                    'content': challan_content,
+                    'generated_at': challan_obj.generated_at.isoformat(),
+                    'account': {
+                        'account_number': account.account_number,
+                        'account_holder_name': account.account_holder_name,
+                        'balance': float(account.balance),
+                    },
+                    'transaction': {
+                        'transaction_id': txn.transaction_id,
+                        'type': txn.get_transaction_type_display(),
+                        'amount': float(txn.amount),
+                        'status': txn.status,
+                        'date': txn.created_at.strftime('%d-%m-%Y'),
+                        'time': txn.created_at.strftime('%H:%M:%S'),
+                    }
+                }
+            }, status=201)
+
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'error': 'Invalid JSON data'
+        }, status=400)
+    except ValueError as ve:
+        return JsonResponse({
+            'success': False,
+            'error': str(ve)
+        }, status=400)
+    except Exception as e:
+        logger.error(f"Error creating challan: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'error': 'Internal server error'
+        }, status=500)
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def create_transaction(request):

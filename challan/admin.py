@@ -160,15 +160,15 @@ class PrinterStatusAdmin(admin.ModelAdmin):
 
 @admin.register(Configuration)
 class ConfigurationAdmin(admin.ModelAdmin):
-    list_display = ['key_name', 'value', 'is_active', 'updated_at']
+    list_display = ['key', 'value', 'is_active', 'updated_at']
     list_filter = ['is_active', 'updated_at']
-    search_fields = ['key_name', 'description']
+    search_fields = ['key', 'description']
     readonly_fields = ['created_at', 'updated_at']
-    ordering = ['key_name']
+    ordering = ['key']
     
     fieldsets = (
         ('Configuration', {
-            'fields': ('key_name', 'value', 'description')
+            'fields': ('key', 'value', 'description')
         }),
         ('Status', {
             'fields': ('is_active',)

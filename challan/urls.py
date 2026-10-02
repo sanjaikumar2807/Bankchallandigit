@@ -12,6 +12,8 @@ urlpatterns = [
     path('transaction/history/', views.get_transaction_history, name='get_transaction_history'),
     
     # Challan endpoints
+    path('challan/scan/<str:barcode_number>/', views.scan_challan, name='scan_challan'),
+    path('challan/create/', views.create_challan_api, name='create_challan_api'),
     path('challan/generate/', views.generate_challan, name='generate_challan'),
     path('challan/print/', views.print_challan, name='print_challan'),
     
