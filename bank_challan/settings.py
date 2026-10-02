@@ -116,14 +116,17 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
-STATICFILES_DIRS = [
+# Only include dirs that exist (safe for both local and Railway)
+_STATIC_DIRS = [
     BASE_DIR / 'static',
     BASE_DIR / 'css',
     BASE_DIR / 'js',
+    BASE_DIR / 'assets',
 ]
+STATICFILES_DIRS = [d for d in _STATIC_DIRS if d.exists()]
 
-# Whitenoise for static file serving in production
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+# Whitenoise - CompressedStaticFilesStorage (no manifest, more reliable on Railway)
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 
 # Media files
 MEDIA_URL = '/media/'
