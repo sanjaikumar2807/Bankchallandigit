@@ -5,6 +5,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PORT=8000
 
 # Set work directory
 WORKDIR /app
@@ -13,7 +14,7 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
-        default-libmysqlclient-dev \
+        libpq-dev \
         pkg-config \
         curl \
     && rm -rf /var/lib/apt/lists/*
@@ -26,17 +27,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app/
 
 # Create static and media directories
-RUN mkdir -p /app/static /app/media
+RUN mkdir -p /app/static /app/media /app/staticfiles
+
+# Collect static files
+RUN python manage.py collectstatic --noinput
 
 # Set permissions
 RUN chmod +x /app/manage.py
 
 # Expose port
-EXPOSE 8000
+EXPOSE $PORT
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/system/status/ || exit 1
+    CMD curl -f http://localhost:${PORT}/api/system/status/ || exit 1
 
-# Default command
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "bank_challan.wsgi:application"]
+# Default command - migrate and start server
+CMD python manage.py migrate && gunicorn --bind 0.0.0.0:$PORT bank_challan.wsgi:application
+
