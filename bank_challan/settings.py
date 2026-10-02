@@ -156,6 +156,9 @@ CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
 # Logging
+# Use console-only logging in production (Render has read-only filesystem)
+_log_handlers = ['console'] if not DEBUG else ['file', 'console']
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -172,12 +175,12 @@ LOGGING = {
     },
     'loggers': {
         'django': {
-            'handlers': ['file', 'console'],
+            'handlers': _log_handlers,
             'level': 'INFO',
             'propagate': True,
         },
         'challan': {
-            'handlers': ['file', 'console'],
+            'handlers': _log_handlers,
             'level': 'DEBUG',
             'propagate': True,
         },
@@ -198,11 +201,13 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:8000",
     "https://*.railway.app",
     "https://*.up.railway.app",
+    "https://*.onrender.com",
 ]
 
 # Security settings for production
 if not DEBUG:
-    SECURE_SSL_REDIRECT = True
+    # Render handles SSL at the proxy level, so disable SSL redirect
+    SECURE_SSL_REDIRECT = os.environ.get('SECURE_SSL_REDIRECT', 'False') == 'True'
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True

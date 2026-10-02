@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: bankchallandigit
+    runtime: python
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn bank_challan.wsgi:application --bind 0.0.0.0:$PORT"
+    envVars:
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: "*"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: WEB_CONCURRENCY
+        value: "4"
